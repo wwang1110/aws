@@ -1,0 +1,7 @@
+boto3
+opensearch-py
+botocore
+awscli
+retrying
+ipywidgets
+s3fs
