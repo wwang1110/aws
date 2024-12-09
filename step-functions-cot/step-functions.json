@@ -1,0 +1,885 @@
+{
+
+  "Comment": "Multi-Modal Prompt Chain Workshop State Machine",
+
+  "StartAt": "Create Characters (Prepare Prompt)",
+
+  "States": {
+
+    "Create Characters (Prepare Prompt)": {
+
+      "Type": "Pass",
+
+      "Parameters": {
+
+        "messages": [
+
+          {
+
+            "role": "user",
+
+            "content": [
+
+              {
+
+                "type": "text",
+
+                "text.$": "States.Format('You are an award-winning fiction writer and you are writing a new story about {}.\n                                Before writing the story, describe five characters that will be in the story.\n\n                                Your response should be formatted as a JSON array, with each element in the array containing a \"name\" key for the character\\'s name and a \"description\" key with the character\\'s description.\n                                An example of a valid response is below, inside <example></example> XML tags.\n                                <example>\n                                [\n                                    \\{\n                                        \"name\": \"Character 1\",\n                                        \"description\": \"Description for character 1\"\n                                    \\},\n                                    \\{\n                                        \"name\": \"Character 2\",\n                                        \"description\": \"Description for character 2\"\n                                    \\}\n                                ]\n                                </example>\n                                Do not include any other content outside of the JSON object.', $$.Execution.Input.description)"
+
+              }
+
+            ]
+
+          }
+
+        ]
+
+      },
+
+      "ResultPath": "$.model_inputs",
+
+      "Next": "Create Characters (Invoke LLM)"
+
+    },
+
+    "Create Characters (Invoke LLM)": {
+
+      "Type": "Task",
+
+      "Resource": "arn:aws:states:::bedrock:invokeModel",
+
+      "Parameters": {
+
+        "ModelId": "arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-instant-v1",
+
+        "Body": {
+
+          "anthropic_version": "bedrock-2023-05-31",
+
+          "messages.$": "$.model_inputs.messages",
+
+          "max_tokens": 512,
+
+          "temperature": 1
+
+        }
+
+      },
+
+      "ResultSelector": {
+
+        "role.$": "$.Body.role",
+
+        "content.$": "$.Body.content"
+
+      },
+
+      "ResultPath": "$.model_outputs",
+
+      "Retry": [
+
+        {
+
+          "ErrorEquals": [
+
+            "ThrottlingException"
+
+          ],
+
+          "BackoffRate": 1,
+
+          "IntervalSeconds": 5,
+
+          "MaxAttempts": 1,
+
+          "MaxDelaySeconds": 15
+
+        }
+
+      ],
+
+      "Next": "Create Characters (Extract LLM Response)"
+
+    },
+
+    "Create Characters (Extract LLM Response)": {
+
+      "Type": "Pass",
+
+      "Parameters": {
+
+        "prompt.$": "States.Format('You are an award-winning fiction writer and you are writing a new story about {}.\n                                Before writing the story, describe five characters that will be in the story.\n\n                                Your response should be formatted as a JSON array, with each element in the array containing a \"name\" key for the character\\'s name and a \"description\" key with the character\\'s description.\n                                An example of a valid response is below, inside <example></example> XML tags.\n                                <example>\n                                [\n                                    \\{\n                                        \"name\": \"Character 1\",\n                                        \"description\": \"Description for character 1\"\n                                    \\},\n                                    \\{\n                                        \"name\": \"Character 2\",\n                                        \"description\": \"Description for character 2\"\n                                    \\}\n                                ]\n                                </example>\n                                Do not include any other content outside of the JSON object.', $$.Execution.Input.description)",
+
+        "response.$": "$.model_outputs.content[0].text",
+
+        "conversation.$": "States.Array($.model_inputs.messages, States.Array($.model_outputs))"
+
+      },
+
+      "ResultPath": "$.model_outputs",
+
+      "Next": "Create Characters (Prepare LLM Output)"
+
+    },
+
+    "Create Characters (Prepare LLM Output)": {
+
+      "Type": "Pass",
+
+      "Parameters": {
+
+        "prompt.$": "$.model_outputs.prompt",
+
+        "response.$": "$.model_outputs.response",
+
+        "conversation.$": "$.model_outputs.conversation[*][*]"
+
+      },
+
+      "ResultPath": "$.model_outputs",
+
+      "Next": "Parse Characters - Initialize Parsing Error Counter"
+
+    },
+
+    "Parse Characters - Initialize Parsing Error Counter": {
+
+      "Type": "Pass",
+
+      "Parameters": {
+
+        "parse_error_count": 0
+
+      },
+
+      "ResultPath": "$.error_state",
+
+      "Next": "Parse Characters"
+
+    },
+
+    "Parse Characters": {
+
+      "Type": "Task",
+
+      "Resource": "arn:aws:states:::lambda:invoke",
+
+      "Parameters": {
+
+        "FunctionName": "arn:aws:lambda:us-west-2:359653762268:function:CharacterPipelineStack-ParseCharactersFunction:$LATEST",
+
+        "Payload": {
+
+          "response_string.$": "$.model_outputs.response",
+
+          "json_schema": {
+
+            "type": "array",
+
+            "items": {
+
+              "type": "object",
+
+              "properties": {
+
+                "name": {
+
+                  "type": "string"
+
+                },
+
+                "description": {
+
+                  "type": "string"
+
+                }
+
+              },
+
+              "required": [
+
+                "name",
+
+                "description"
+
+              ],
+
+              "additionalProperties": false
+
+            },
+
+            "minItems": 5,
+
+            "maxItems": 5,
+
+            "uniqueItems": true
+
+          }
+
+        }
+
+      },
+
+      "Retry": [
+
+        {
+
+          "ErrorEquals": [
+
+            "Lambda.ServiceException",
+
+            "Lambda.AWSLambdaException",
+
+            "Lambda.SdkClientException",
+
+            "Lambda.ClientExecutionTimeoutException"
+
+          ],
+
+          "MaxAttempts": 6,
+
+          "BackoffRate": 2,
+
+          "IntervalSeconds": 2
+
+        }
+
+      ],
+
+      "Next": "Character Backstory Map",
+
+      "ResultSelector": {
+
+        "characters.$": "$.Payload"
+
+      },
+
+      "ResultPath": "$.parsed_output",
+
+      "Catch": [
+
+        {
+
+          "ErrorEquals": [
+
+            "States.TaskFailed"
+
+          ],
+
+          "Next": "Parse Characters - Parse Error Message",
+
+          "ResultPath": "$.caught_error"
+
+        }
+
+      ]
+
+    },
+
+    "Character Backstory Map": {
+
+      "Type": "Map",
+
+      "ItemProcessor": {
+
+        "ProcessorConfig": {
+
+          "Mode": "INLINE"
+
+        },
+
+        "StartAt": "Create Character Backstories (Prepare Prompt)",
+
+        "States": {
+
+          "Create Character Backstories (Prepare Prompt)": {
+
+            "Type": "Pass",
+
+            "Parameters": {
+
+              "messages": [
+
+                {
+
+                  "role": "user",
+
+                  "content": [
+
+                    {
+
+                      "type": "text",
+
+                      "text.$": "States.Format('Now describe what will happen in the story to {}, of whom you previously describes as: {}.', $.character.name, $.character.description)"
+
+                    }
+
+                  ]
+
+                }
+
+              ]
+
+            },
+
+            "ResultPath": "$.model_inputs",
+
+            "Next": "Create Character Backstories (Include Previous Messages)"
+
+          },
+
+          "Create Character Backstories (Include Previous Messages)": {
+
+            "Type": "Pass",
+
+            "Parameters": {
+
+              "messages.$": "States.Array($.model_outputs.conversation, $.model_inputs.messages)"
+
+            },
+
+            "ResultPath": "$.model_inputs",
+
+            "Next": "Create Character Backstories (Invoke LLM)"
+
+          },
+
+          "Create Character Backstories (Invoke LLM)": {
+
+            "Type": "Task",
+
+            "Resource": "arn:aws:states:::bedrock:invokeModel",
+
+            "Parameters": {
+
+              "ModelId": "arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-instant-v1",
+
+              "Body": {
+
+                "anthropic_version": "bedrock-2023-05-31",
+
+                "messages.$": "$.model_inputs.messages[*][*]",
+
+                "max_tokens": 1024,
+
+                "temperature": 1
+
+              }
+
+            },
+
+            "ResultSelector": {
+
+              "role.$": "$.Body.role",
+
+              "content.$": "$.Body.content"
+
+            },
+
+            "ResultPath": "$.model_outputs",
+
+            "Retry": [
+
+              {
+
+                "ErrorEquals": [
+
+                  "ThrottlingException"
+
+                ],
+
+                "BackoffRate": 1,
+
+                "IntervalSeconds": 5,
+
+                "MaxAttempts": 1,
+
+                "MaxDelaySeconds": 15
+
+              }
+
+            ],
+
+            "Next": "Create Character Backstories (Extract LLM Response)"
+
+          },
+
+          "Create Character Backstories (Extract LLM Response)": {
+
+            "Type": "Pass",
+
+            "Parameters": {
+
+              "prompt.$": "States.Format('Now describe what will happen in the story to {}, of whom you previously describes as: {}.', $.character.name, $.character.description)",
+
+              "response.$": "$.model_outputs.content[0].text",
+
+              "conversation.$": "States.Array($.model_inputs.messages[*][*], States.Array($.model_outputs))"
+
+            },
+
+            "ResultPath": "$.model_outputs",
+
+            "Next": "Create Character Backstories (Prepare LLM Output)"
+
+          },
+
+          "Create Character Backstories (Prepare LLM Output)": {
+
+            "Type": "Pass",
+
+            "End": true,
+
+            "Parameters": {
+
+              "prompt.$": "$.model_outputs.prompt",
+
+              "response.$": "$.model_outputs.response",
+
+              "conversation.$": "$.model_outputs.conversation[*][*]"
+
+            },
+
+            "ResultPath": "$.model_outputs"
+
+          }
+
+        }
+
+      },
+
+      "ItemsPath": "$.parsed_output.characters",
+
+      "ItemSelector": {
+
+        "id.$": "$$.Execution.Input.id",
+
+        "description.$": "$$.Execution.Input.description",
+
+        "character.$": "$$.Map.Item.Value",
+
+        "model_outputs.$": "$.model_outputs"
+
+      },
+
+      "MaxConcurrency": 3,
+
+      "Next": "Merge Character Metadata"
+
+    },
+
+    "Merge Character Metadata": {
+
+      "Type": "Task",
+
+      "Resource": "arn:aws:states:::lambda:invoke",
+
+      "Parameters": {
+
+        "Payload.$": "$",
+
+        "FunctionName": "arn:aws:lambda:us-west-2:359653762268:function:CharacterPipelineStack-MergeCharacterMetadataFunction:$LATEST"
+
+      },
+
+      "Retry": [
+
+        {
+
+          "ErrorEquals": [
+
+            "Lambda.ServiceException",
+
+            "Lambda.AWSLambdaException",
+
+            "Lambda.SdkClientException",
+
+            "Lambda.TooManyRequestsException"
+
+          ],
+
+          "IntervalSeconds": 1,
+
+          "MaxAttempts": 3,
+
+          "BackoffRate": 2,
+
+          "JitterStrategy": "FULL"
+
+        },
+
+        {
+
+          "ErrorEquals": [
+
+            "Lambda.ClientExecutionTimeoutException"
+
+          ],
+
+          "BackoffRate": 2,
+
+          "IntervalSeconds": 1,
+
+          "MaxAttempts": 3,
+
+          "Comment": "Lambda.ClientExecutionTimeoutException"
+
+        }
+
+      ],
+
+      "ResultSelector": {
+
+        "model_outputs.$": "$.Payload"
+
+      },
+
+      "Next": "Create Story (Prepare Prompt)"
+
+    },
+
+    "Create Story (Prepare Prompt)": {
+
+      "Type": "Pass",
+
+      "Parameters": {
+
+        "messages": [
+
+          {
+
+            "role": "user",
+
+            "content": [
+
+              {
+
+                "type": "text",
+
+                "text.$": "States.Format('Now write a story about {}. Respond only with the story content.', $$.Execution.Input.description)"
+
+              }
+
+            ]
+
+          }
+
+        ]
+
+      },
+
+      "ResultPath": "$.model_inputs",
+
+      "Next": "Create Story (Include Previous Messages)"
+
+    },
+
+    "Create Story (Include Previous Messages)": {
+
+      "Type": "Pass",
+
+      "Parameters": {
+
+        "messages.$": "States.Array($.model_outputs.conversation, $.model_inputs.messages)"
+
+      },
+
+      "ResultPath": "$.model_inputs",
+
+      "Next": "Create Story (Invoke LLM)"
+
+    },
+
+    "Create Story (Invoke LLM)": {
+
+      "Type": "Task",
+
+      "Resource": "arn:aws:states:::bedrock:invokeModel",
+
+      "Parameters": {
+
+        "ModelId": "arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-instant-v1",
+
+        "Body": {
+
+          "anthropic_version": "bedrock-2023-05-31",
+
+          "messages.$": "$.model_inputs.messages[*][*]",
+
+          "max_tokens": 2048,
+
+          "temperature": 1
+
+        }
+
+      },
+
+      "ResultSelector": {
+
+        "role.$": "$.Body.role",
+
+        "content.$": "$.Body.content"
+
+      },
+
+      "ResultPath": "$.model_outputs",
+
+      "Retry": [
+
+        {
+
+          "ErrorEquals": [
+
+            "ThrottlingException"
+
+          ],
+
+          "BackoffRate": 1,
+
+          "IntervalSeconds": 5,
+
+          "MaxAttempts": 1,
+
+          "MaxDelaySeconds": 15
+
+        }
+
+      ],
+
+      "Next": "Create Story (Extract LLM Response)"
+
+    },
+
+    "Create Story (Extract LLM Response)": {
+
+      "Type": "Pass",
+
+      "Parameters": {
+
+        "prompt.$": "States.Format('Now write a story about {}. Respond only with the story content.', $$.Execution.Input.description)",
+
+        "response.$": "$.model_outputs.content[0].text"
+
+      },
+
+      "ResultPath": "$.model_outputs",
+
+      "Next": "Format Story"
+
+    },
+
+    "Format Story": {
+
+      "Type": "Pass",
+
+      "End": true,
+
+      "Parameters": {
+
+        "story.$": "$.model_outputs.response"
+
+      }
+
+    },
+
+    "Parse Characters - Parse Error Message": {
+
+      "Type": "Pass",
+
+      "Parameters": {
+
+        "parsed_error.$": "States.StringToJson($.caught_error.Cause)",
+
+        "parse_error_count.$": "States.MathAdd($.error_state.parse_error_count, 1)"
+
+      },
+
+      "ResultPath": "$.error_state",
+
+      "Next": "Parse Characters - Exceeded Fix JSON attempts?"
+
+    },
+
+    "Parse Characters - Exceeded Fix JSON attempts?": {
+
+      "Type": "Choice",
+
+      "Choices": [
+
+        {
+
+          "Variable": "$.error_state.parse_error_count",
+
+          "NumericLessThan": 3,
+
+          "Next": "Parse Characters - Fix JSON (Prepare Prompt)"
+
+        }
+
+      ],
+
+      "Default": "Parse Characters - Fail"
+
+    },
+
+    "Parse Characters - Fail": {
+
+      "Type": "Fail"
+
+    },
+
+    "Parse Characters - Fix JSON (Prepare Prompt)": {
+
+      "Type": "Pass",
+
+      "Parameters": {
+
+        "messages": [
+
+          {
+
+            "role": "user",
+
+            "content": [
+
+              {
+
+                "type": "text",
+
+                "text.$": "States.Format('\n            I attempted to validate your response against my JSON schema, but received the following error inside <error></error> XML tags.\n            <error>\n            {}\n\n            {}\n            </error>\n\n            Here is my JSON schema, inside <schema></schema> XML tags:\n            <schema>\n            \\{\n  \"type\": \"array\",\n  \"items\": \\{\n    \"type\": \"object\",\n    \"properties\": \\{\n      \"name\": \\{\n        \"type\": \"string\"\n      \\},\n      \"description\": \\{\n        \"type\": \"string\"\n      \\}\n    \\},\n    \"required\": [\n      \"name\",\n      \"description\"\n    ],\n    \"additionalProperties\": false\n  \\},\n  \"minItems\": 5,\n  \"maxItems\": 5,\n  \"uniqueItems\": true\n\\}\n            </schema>\n\n            Please try to fix errors in the JSON response you gave previously and return a new JSON response that complies with the JSON schema.\n            Do NOT include any explanation, comments, apology, or markdown style code-back-ticks.\n            Remember - only return a valid JSON object.', $.error_state.parsed_error.errorType, $.error_state.parsed_error.errorMessage)"
+
+              }
+
+            ]
+
+          }
+
+        ]
+
+      },
+
+      "ResultPath": "$.model_inputs",
+
+      "Next": "Parse Characters - Fix JSON (Include Previous Messages)"
+
+    },
+
+    "Parse Characters - Fix JSON (Include Previous Messages)": {
+
+      "Type": "Pass",
+
+      "Parameters": {
+
+        "messages.$": "States.Array($.model_outputs.conversation, $.model_inputs.messages)"
+
+      },
+
+      "ResultPath": "$.model_inputs",
+
+      "Next": "Parse Characters - Fix JSON (Invoke LLM)"
+
+    },
+
+    "Parse Characters - Fix JSON (Invoke LLM)": {
+
+      "Type": "Task",
+
+      "Resource": "arn:aws:states:::bedrock:invokeModel",
+
+      "Parameters": {
+
+        "ModelId": "arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-instant-v1",
+
+        "Body": {
+
+          "anthropic_version": "bedrock-2023-05-31",
+
+          "messages.$": "$.model_inputs.messages[*][*]",
+
+          "max_tokens": 500,
+
+          "temperature": 0
+
+        }
+
+      },
+
+      "ResultSelector": {
+
+        "role.$": "$.Body.role",
+
+        "content.$": "$.Body.content"
+
+      },
+
+      "ResultPath": "$.model_outputs",
+
+      "Retry": [
+
+        {
+
+          "ErrorEquals": [
+
+            "ThrottlingException"
+
+          ],
+
+          "BackoffRate": 1,
+
+          "IntervalSeconds": 5,
+
+          "MaxAttempts": 1,
+
+          "MaxDelaySeconds": 15
+
+        }
+
+      ],
+
+      "Next": "Parse Characters - Fix JSON (Extract LLM Response)"
+
+    },
+
+    "Parse Characters - Fix JSON (Extract LLM Response)": {
+
+      "Type": "Pass",
+
+      "Parameters": {
+
+        "prompt.$": "States.Format('\n            I attempted to validate your response against my JSON schema, but received the following error inside <error></error> XML tags.\n            <error>\n            {}\n\n            {}\n            </error>\n\n            Here is my JSON schema, inside <schema></schema> XML tags:\n            <schema>\n            \\{\n  \"type\": \"array\",\n  \"items\": \\{\n    \"type\": \"object\",\n    \"properties\": \\{\n      \"name\": \\{\n        \"type\": \"string\"\n      \\},\n      \"description\": \\{\n        \"type\": \"string\"\n      \\}\n    \\},\n    \"required\": [\n      \"name\",\n      \"description\"\n    ],\n    \"additionalProperties\": false\n  \\},\n  \"minItems\": 5,\n  \"maxItems\": 5,\n  \"uniqueItems\": true\n\\}\n            </schema>\n\n            Please try to fix errors in the JSON response you gave previously and return a new JSON response that complies with the JSON schema.\n            Do NOT include any explanation, comments, apology, or markdown style code-back-ticks.\n            Remember - only return a valid JSON object.', $.error_state.parsed_error.errorType, $.error_state.parsed_error.errorMessage)",
+
+        "response.$": "$.model_outputs.content[0].text",
+
+        "conversation.$": "States.Array($.model_inputs.messages[*][*], States.Array($.model_outputs))"
+
+      },
+
+      "ResultPath": "$.model_outputs",
+
+      "Next": "Parse Characters - Fix JSON (Prepare LLM Output)"
+
+    },
+
+    "Parse Characters - Fix JSON (Prepare LLM Output)": {
+
+      "Type": "Pass",
+
+      "Parameters": {
+
+        "prompt.$": "$.model_outputs.prompt",
+
+        "response.$": "$.model_outputs.response",
+
+        "conversation.$": "$.model_outputs.conversation[*][*]"
+
+      },
+
+      "ResultPath": "$.model_outputs",
+
+      "Next": "Parse Characters"
+
+    }
+
+  }
+
+}
